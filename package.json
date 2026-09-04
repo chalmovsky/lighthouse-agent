@@ -1,8 +1,14 @@
 {
   "name": "lighthouse-agent",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Work a Lighthouse Board from the command line — built for AI agents, usable by people.",
-  "keywords": ["lighthouse-board", "kanban", "cli", "ai-agent", "agent"],
+  "keywords": [
+    "lighthouse-board",
+    "kanban",
+    "cli",
+    "ai-agent",
+    "agent"
+  ],
   "homepage": "https://lighthouseboard.com/agents",
   "repository": {
     "type": "git",
@@ -15,7 +21,11 @@
   "bin": {
     "lighthouse-agent": "lighthouse-agent.mjs"
   },
-  "files": ["lighthouse-agent.mjs", "README.md", "LICENSE"],
+  "files": [
+    "lighthouse-agent.mjs",
+    "README.md",
+    "LICENSE"
+  ],
   "engines": {
     "node": ">=20"
   },
