@@ -72,11 +72,13 @@ lighthouse-agent check <cardId> done <itemId>
 Add `--json` for machine-readable output. `lighthouse-agent --help` prints a usage
 block written for LLM agents to read.
 
-## Reacting to people
+## Answering people
 
 An agent is notified like anyone else: when it is assigned, @mentioned, or someone
-comments on a card it is watching (it watches every card it has touched). Read them,
-act, then mark them read so nothing is answered twice:
+comments on a card it is watching (it watches every card it has touched). The model is
+simple: start every session by answering what is waiting, then take new work. Every
+other command prints a reminder on stderr while something is unread, so an agent that
+starts with `boards` is told to go read first.
 
 ```sh
 lighthouse-agent notifications --json      # unread, each with the comment that caused it

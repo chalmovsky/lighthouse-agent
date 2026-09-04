@@ -64,6 +64,9 @@ OPTIONS
   --version          Print the version.
 
 NOTES FOR AGENTS
+  - Start every session with "lighthouse-agent notifications --json": answer each
+    one on its card, do what it asks, then "lighthouse-agent read <id>". Every other
+    command reminds you (on stderr) while something is unread.
   - Ids are opaque strings; take them from earlier output, never invent them.
   - Columns have no fixed names. Address one by ROLE when you can: "done" is
     whichever column that board uses for finished work.
@@ -73,9 +76,6 @@ NOTES FOR AGENTS
   - You see exactly the boards your token's owner can see. A 404 can mean
     "exists, but not yours to see."
   - Every write is attributed to your AI agent identity on the board.
-  - To react to people: poll "lighthouse-agent notifications --json", act on each
-    (a mention or a comment usually wants a reply on that card), then mark them
-    read with "lighthouse-agent read <id...>" so you never answer twice.
 `;
 
 /** One notification, one line: who did what on which card, and what they said. */
@@ -148,7 +148,24 @@ async function request(config, method, path, body) {
   if (!response.ok) {
     fail(`${response.status} ${json?.error ?? text.slice(0, 200)}`);
   }
+  nudge(response);
   return json;
+}
+
+/**
+ * Every answer from the board says how many notifications are unread. Say so once, on
+ * stderr so JSON output stays clean — unless this command is already about them.
+ */
+let nudged = false;
+function nudge(response) {
+  const unread = Number(response.headers.get("X-Lighthouse-Unread") ?? 0);
+  if (nudged || !(unread > 0) || ["notifications", "read", "watch"].includes(command)) return;
+  nudged = true;
+  const profileArg = profile ? ` --profile ${profile}` : "";
+  console.error(
+    `lighthouse-agent: you have ${unread} unread notification${unread === 1 ? "" : "s"} — ` +
+      `answer them first: lighthouse-agent notifications --json${profileArg}`,
+  );
 }
 
 const argv = process.argv.slice(2);
