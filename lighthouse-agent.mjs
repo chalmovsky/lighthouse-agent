@@ -8,12 +8,13 @@
 //
 // Source: https://github.com/chalmovsky/lighthouse-agent
 
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
-const CONFIG_PATH = join(homedir(), ".config", "lighthouse-agent", "config.json");
+const CONFIG_DIR = join(homedir(), ".config", "lighthouse-agent");
+const PROFILE_NAME = /^[A-Za-z0-9._-]+$/;
 const VERSION = createRequire(import.meta.url)("./package.json").version;
 
 const HELP = `lighthouse-agent ${VERSION}: work a Lighthouse Board board from the command line
@@ -24,12 +25,21 @@ Guide for agents (vocabulary, workflow, rules, the HTTP API):
 SETUP
   lighthouse-agent setup <url> <token>   Save the board's URL (the one you open in a
                                          browser) and access token, then verify them.
+                                         Refuses to replace a different token already
+                                         saved: add --profile <name> for another agent,
+                                         or --force to replace on purpose.
+  lighthouse-agent profiles              The saved profiles (name and URL, never the token).
 
 READ
   lighthouse-agent boards                Every board you can see, with its columns.
   lighthouse-agent columns <boardId>     One board's columns (id, roles, name).
   lighthouse-agent cards <boardId>       Open and closed cards on a board.
   lighthouse-agent card <cardId>         One card in full: description, checklist, comments.
+  lighthouse-agent notifications [--all] What you were told: assigned, mentioned, or a
+                                         comment on a card you watch. Unread only, unless
+                                         --all. Each carries the comment that caused it.
+  lighthouse-agent watch [--every <s>]   Keep polling (default every 30 s) and print each
+                                         new notification as it arrives, until stopped.
 
 WRITE
   lighthouse-agent add <boardId> <title> [--desc <text>]   Create a card. It lands in the
@@ -41,11 +51,17 @@ WRITE
   lighthouse-agent check <cardId> add <text>               Append a checklist item.
   lighthouse-agent check <cardId> done <itemId>            Tick a checklist item.
   lighthouse-agent check <cardId> undo <itemId>            Untick a checklist item.
+  lighthouse-agent read <notificationId...> | read --all   Mark notifications read.
 
 OPTIONS
-  --json     Print raw JSON instead of tables (recommended for agents).
-  --help     This text.
-  --version  Print the version.
+  --json             Print raw JSON instead of tables (recommended for agents).
+  --profile <name>   Use a named profile, so several agents can share one machine.
+                     Each keeps its own token in ~/.config/lighthouse-agent/profiles/.
+                     LIGHTHOUSE_PROFILE=<name> does the same; LIGHTHOUSE_CONFIG=<path>
+                     points at a config file directly. Without any of these, the one
+                     config at ~/.config/lighthouse-agent/config.json is used.
+  --help             This text.
+  --version          Print the version.
 
 NOTES FOR AGENTS
   - Ids are opaque strings; take them from earlier output, never invent them.
@@ -57,7 +73,22 @@ NOTES FOR AGENTS
   - You see exactly the boards your token's owner can see. A 404 can mean
     "exists, but not yours to see."
   - Every write is attributed to your AI agent identity on the board.
+  - To react to people: poll "lighthouse-agent notifications --json", act on each
+    (a mention or a comment usually wants a reply on that card), then mark them
+    read with "lighthouse-agent read <id...>" so you never answer twice.
 `;
+
+/** One notification, one line: who did what on which card, and what they said. */
+function notificationLine(n) {
+  const what =
+    n.kind === "assigned"
+      ? "assigned you"
+      : n.kind === "mentioned"
+        ? "mentioned you"
+        : "commented";
+  const said = n.comment ? `  — ${JSON.stringify(n.comment.body)}` : "";
+  return `${n.id}  ${n.actor.name} ${what} on #${n.cardNumber} ${n.cardTitle} (card ${n.cardId})${said}`;
+}
 
 /** Roles are what an agent should address a column by, so they lead the line. */
 function roleTag(column) {
@@ -70,11 +101,26 @@ function fail(message) {
   process.exit(1);
 }
 
-function loadConfig() {
+/**
+ * Where this run's config lives. One machine can host several agents, each with its own
+ * token: a profile is just a separate file. The plain config.json stays the default so
+ * a single-agent setup never has to know profiles exist.
+ */
+function configPath(profile) {
+  if (process.env.LIGHTHOUSE_CONFIG) return process.env.LIGHTHOUSE_CONFIG;
+  if (!profile) return join(CONFIG_DIR, "config.json");
+  if (!PROFILE_NAME.test(profile)) {
+    fail(`profile names use letters, digits, ".", "_" and "-" only (got "${profile}")`);
+  }
+  return join(CONFIG_DIR, "profiles", `${profile}.json`);
+}
+
+function loadConfig(path, profile) {
   try {
-    return JSON.parse(readFileSync(CONFIG_PATH, "utf8"));
+    return JSON.parse(readFileSync(path, "utf8"));
   } catch {
-    fail(`not set up yet. Run: lighthouse-agent setup <url> <token> (config: ${CONFIG_PATH})`);
+    const how = profile ? ` --profile ${profile}` : "";
+    fail(`not set up yet. Run: lighthouse-agent setup <url> <token>${how} (config: ${path})`);
   }
 }
 
@@ -121,6 +167,8 @@ function out(data, plain) {
   console.log(asJson ? JSON.stringify(data, null, 2) : plain(data));
 }
 
+const profile = flag("profile") ?? process.env.LIGHTHOUSE_PROFILE ?? undefined;
+const CONFIG_PATH = configPath(profile);
 const command = args[0];
 
 if (!command || command === "--help" || command === "help") {
@@ -134,9 +182,27 @@ if (command === "--version" || command === "version") {
 }
 
 if (command === "setup") {
-  const [, url, token] = args;
-  if (!url || !token) fail("usage: lighthouse-agent setup <url> <token>");
+  const force = args.includes("--force");
+  const [, url, token] = args.filter((a) => a !== "--force");
+  if (!url || !token) fail("usage: lighthouse-agent setup <url> <token> [--profile <name>] [--force]");
   const config = { url: url.replace(/\/+$/, ""), token };
+  // A second agent on the same machine must not silently evict the first: its token
+  // would be gone from disk with nothing to say so. Profiles keep them apart.
+  if (!force && existsSync(CONFIG_PATH)) {
+    let existing = null;
+    try {
+      existing = JSON.parse(readFileSync(CONFIG_PATH, "utf8"));
+    } catch {
+      /* unreadable: treat as absent */
+    }
+    if (existing && existing.token !== token) {
+      fail(
+        `already set up for ${existing.url} (${CONFIG_PATH}). ` +
+          `To add another agent, give it a profile: lighthouse-agent setup <url> <token> --profile <name>. ` +
+          `To replace this one on purpose, add --force.`,
+      );
+    }
+  }
   const { boards } = await request(config, "GET", "/api/boards");
   mkdirSync(dirname(CONFIG_PATH), { recursive: true });
   writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + "\n", { mode: 0o600 });
@@ -146,9 +212,85 @@ if (command === "setup") {
   process.exit(0);
 }
 
-const config = loadConfig();
+if (command === "profiles") {
+  // Names and URLs only: a token is never printed, not even here.
+  const entries = [];
+  const read = (name, path) => {
+    try {
+      entries.push({ name, url: JSON.parse(readFileSync(path, "utf8")).url, path });
+    } catch {
+      /* not set up, or unreadable: not a profile */
+    }
+  };
+  read("(default)", join(CONFIG_DIR, "config.json"));
+  let files = [];
+  try {
+    files = readdirSync(join(CONFIG_DIR, "profiles")).filter((f) => f.endsWith(".json"));
+  } catch {
+    /* no profiles directory yet */
+  }
+  for (const file of files.sort()) {
+    read(file.slice(0, -5), join(CONFIG_DIR, "profiles", file));
+  }
+  out(entries, (data) =>
+    data.length
+      ? data.map((e) => `${e.name.padEnd(16)} ${e.url}`).join("\n")
+      : "No profiles yet. Run: lighthouse-agent setup <url> <token> [--profile <name>]",
+  );
+  process.exit(0);
+}
+
+const config = loadConfig(CONFIG_PATH, profile);
+
+/** GET /api/notifications, unread unless asked for everything. */
+async function fetchNotifications(all) {
+  const { notifications } = await request(
+    config,
+    "GET",
+    `/api/notifications${all ? "?all=1" : ""}`,
+  );
+  return notifications;
+}
 
 switch (command) {
+  case "notifications": {
+    const all = args.includes("--all");
+    const notifications = await fetchNotifications(all);
+    out(notifications, (data) =>
+      data.length ? data.map(notificationLine).join("\n") : "Nothing new.",
+    );
+    break;
+  }
+
+  case "read": {
+    const all = args.includes("--all");
+    const ids = args.slice(1).filter((a) => a !== "--all");
+    if (!all && ids.length === 0) {
+      fail("usage: lighthouse-agent read <notificationId...> | lighthouse-agent read --all");
+    }
+    const result = await request(config, "POST", "/api/notifications/read", all ? { all: true } : { ids });
+    out(result, (r) => `Marked ${r.marked} read.`);
+    break;
+  }
+
+  case "watch": {
+    // Prints each unread notification once as it appears and never marks anything
+    // read: that is the reader's job, after acting, so a crash mid-reply loses nothing.
+    const every = Math.max(5, Number(flag("every") ?? 30) || 30);
+    const seen = new Set();
+    let first = true;
+    for (;;) {
+      for (const n of (await fetchNotifications(false)).reverse()) {
+        if (seen.has(n.id)) continue;
+        seen.add(n.id);
+        console.log(asJson ? JSON.stringify(n) : notificationLine(n));
+      }
+      if (first && !asJson) console.error(`watching every ${every}s — Ctrl-C to stop`);
+      first = false;
+      await new Promise((resolve) => setTimeout(resolve, every * 1000));
+    }
+  }
+
   case "boards": {
     const { boards } = await request(config, "GET", "/api/boards");
     out(boards, (data) =>

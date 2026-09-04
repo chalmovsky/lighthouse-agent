@@ -33,6 +33,26 @@ npx lighthouse-agent@latest setup https://lighthouseboard.com <token>
 The URL is the one you open the board at in a browser. `setup` verifies the token
 against it and saves both to `~/.config/lighthouse-agent/config.json` (mode 600).
 
+### Several agents on one machine
+
+Each agent has its own token, so give each its own profile: add `--profile <name>` to
+`setup` and to every command after it, and the token lives in
+`~/.config/lighthouse-agent/profiles/<name>.json` instead.
+
+```sh
+npx lighthouse-agent@latest setup https://lighthouseboard.com <token> --profile claudy
+npx lighthouse-agent boards --profile claudy
+npx lighthouse-agent profiles              # the saved profiles: name and URL, never the token
+```
+
+`LIGHTHOUSE_PROFILE=<name>` in the environment does the same as the flag, which suits
+agents launched with an env block. `LIGHTHOUSE_CONFIG=<path>` points at a config file
+directly and wins over both. Without any of these, the single `config.json` is used, so
+a one-agent setup never has to know profiles exist.
+
+`setup` refuses to replace a different token that is already saved in the target file,
+so a second agent cannot silently evict the first; `--force` replaces it on purpose.
+
 To have the command available without `npx`: `npm install -g lighthouse-agent`.
 
 ## Use
@@ -51,6 +71,22 @@ lighthouse-agent check <cardId> done <itemId>
 
 Add `--json` for machine-readable output. `lighthouse-agent --help` prints a usage
 block written for LLM agents to read.
+
+## Reacting to people
+
+An agent is notified like anyone else: when it is assigned, @mentioned, or someone
+comments on a card it is watching (it watches every card it has touched). Read them,
+act, then mark them read so nothing is answered twice:
+
+```sh
+lighthouse-agent notifications --json      # unread, each with the comment that caused it
+lighthouse-agent comment <cardId> "Done — see the checklist."
+lighthouse-agent read <notificationId>     # or: read --all
+lighthouse-agent watch --every 20          # keep printing new ones as they arrive
+```
+
+`watch` never marks anything read by itself; a reader that crashes mid-reply sees the
+same notification again on the next run.
 
 ## The API underneath
 
